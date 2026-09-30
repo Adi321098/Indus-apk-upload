@@ -7,7 +7,6 @@ on:
         description: "Direct APK download URL"
         required: true
         type: string
-        default: "https://expo.dev/artifacts/eas/V9So0GpyCXu-1zIkLbpDzslEc7LAtw4NxbDrLciOKH0.apk"
 
       package_name:
         description: "Android package name"
@@ -15,86 +14,109 @@ on:
         type: string
         default: "com.connectpi.bladerush"
 
-      release_notes:
-        description: "Release notes"
-        required: false
-        type: string
-        default: "New release uploaded via GitHub Actions"
-
 jobs:
   upload-to-indus:
-    name: Download APK & Upload to Indus
-    runs-on: ubuntu-latest
+    name: Download APK and Upload to Indus
+    runs-on: ubuntu-24.04
 
     permissions:
       contents: read
 
     steps:
-      # 1. Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # 2. Download APK from URL
       - name: Download APK
         shell: bash
         env:
           APK_URL: ${{ inputs.apk_url }}
         run: |
-          set -e
+          set -euo pipefail
 
           echo "Downloading APK..."
 
           curl \
-            --fail \
             --location \
+            --fail \
+            --show-error \
+            --silent \
             --retry 3 \
             --retry-delay 5 \
             --connect-timeout 30 \
-            --max-time 600 \
+            --max-time 900 \
             "$APK_URL" \
             --output app-release.apk
 
-          echo "APK downloaded successfully."
-
-          ls -lh app-release.apk
-
-          echo "Checking APK file..."
-
-          file app-release.apk
+          echo "Download completed."
 
           if [ ! -s app-release.apk ]; then
             echo "ERROR: APK file is empty."
             exit 1
           fi
 
-      # 3. Verify APK is actually an Android APK
-      - name: Verify APK
+          echo "APK size:"
+          ls -lh app-release.apk
+
+      - name: Validate APK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          if unzip -t app-release.apk >/dev/null 2>&1; then
-            echo "APK ZIP structure is valid."
-          else
-            echo "ERROR: Downloaded file is not a valid APK."
+          echo "Validating APK..."
+
+          if ! unzip -t app-release.apk >/dev/null 2>&1; then
+            echo "ERROR: Downloaded file is not a valid APK/ZIP."
             exit 1
           fi
 
-      # 4. Upload APK to Indus Appstore
-      - name: Upload APK to Indus Appstore
-        uses: indusappstore/appstore-release@v1
-        with:
-          operation_mode: 'deploy_only'
-          file_path: './app-release.apk'
-          file_type: 'apk'
-          package_name: ${{ inputs.package_name }}
-          api_token: ${{ secrets.INDUS_APP_STORE_API_TOKEN }}
-          release_notes: ${{ inputs.release_notes }}
+          echo "APK validation successful."
 
-      # 5. Cleanup downloaded APK
+      - name: Upload APK to Indus Appstore
+        shell: bash
+        env:
+          INDUS_API_TOKEN: ${{ secrets.INDUS_APP_STORE_API_TOKEN }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$INDUS_API_TOKEN" ]; then
+            echo "ERROR: INDUS_APP_STORE_API_TOKEN secret is not configured."
+            exit 1
+          fi
+
+          echo "Uploading APK to Indus Appstore..."
+          echo "Package: $PACKAGE_NAME"
+
+          RESPONSE_FILE="indus-response.json"
+
+          HTTP_STATUS=$(curl \
+            --location \
+            --silent \
+            --show-error \
+            --output "$RESPONSE_FILE" \
+            --write-out "%{http_code}" \
+            --request POST \
+            "https://developer-api.indusappstore.com/devtools/apk/upgrade/${PACKAGE_NAME}" \
+            --header "accept: application/json" \
+            --header "Authorization: ${INDUS_API_TOKEN}" \
+            --form "file=@app-release.apk;type=application/vnd.android.package-archive")
+
+          echo ""
+          echo "Indus API HTTP Status: $HTTP_STATUS"
+          echo "Indus API Response:"
+          cat "$RESPONSE_FILE"
+          echo ""
+
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "ERROR: Indus API upload failed."
+            exit 1
+          fi
+
+          echo "========================================"
+          echo "APK uploaded successfully to Indus."
+          echo "========================================"
+
       - name: Cleanup
         if: always()
         shell: bash
         run: |
           rm -f app-release.apk
-          echo "Temporary APK removed."
+          rm -f indus-response.json
+          echo "Temporary files cleaned up."
